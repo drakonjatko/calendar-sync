@@ -18,8 +18,9 @@ This is a **Google Apps Script** project — there is no local build step.
 
 1. Copy all `.gs` files into a GAS project at [script.google.com](https://script.google.com)
 2. Fill in `CONFIG` entries in `Config.gs` with real ICS URLs and Google Calendar IDs
-3. Set a time-based trigger on `syncCalendar()` (e.g., every 15 minutes)
-4. Required OAuth scope: `https://www.googleapis.com/auth/calendar`
+3. Enable the Advanced Calendar Service: Apps Script editor → Services → Google Calendar API
+4. Set a time-based trigger on `syncCalendar()` (e.g., every 15 minutes)
+5. Required OAuth scope: `https://www.googleapis.com/auth/calendar`
 
 ## Conventions
 

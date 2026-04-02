@@ -65,11 +65,11 @@ Add more entries to the `CONFIG` array in `Config.gs` to sync additional Office 
 ## Behavior
 
 - **Sync window**: 30 days in the past to 1 year in the future. Events outside this range are ignored.
-- **Event titles**: Timed events are created as `{PREFIX} meeting`; all-day events as `{PREFIX} - FREE`.
+- **Event titles**: All synced events are titled `{PREFIX} meeting`. All-day events from Outlook are skipped and never appear in Google Calendar.
 - **Updates**: If a synced event's time changes in Outlook, it will be updated on the next sync.
 - **Deletions**: If an event is removed from the Outlook feed, it will be deleted from Google Calendar on the next sync.
 - **Tentative events**: Events marked as tentative in Outlook are created as transparent (free) in Google Calendar.
-- **Recurring events**: Office 365 sends recurring meetings as series with a recurrence rule (RRULE). These are created as real recurring events in Google Calendar via the Advanced Calendar API, so they show as a series and respect DST correctly. Cancelled occurrences (individual deletions from a series) are explicitly removed from the Google Calendar series.
+- **Recurring events**: Office 365 sends recurring meetings as series with a recurrence rule (RRULE). These are created as real recurring events in Google Calendar via the Advanced Calendar API, so they show as a series and respect DST correctly. If an individual occurrence is deleted in Outlook, that specific instance is explicitly removed from the Google Calendar series. If an occurrence is rescheduled to a different time, the original slot is removed and a standalone event is created at the new time.
 
 ## Troubleshooting
 
