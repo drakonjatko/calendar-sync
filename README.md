@@ -70,6 +70,7 @@ Add more entries to the `CONFIG` array in `Config.gs` to sync additional Office 
 - **Deletions**: If an event is removed from the Outlook feed, it will be deleted from Google Calendar on the next sync.
 - **Tentative events**: Events marked as tentative in Outlook are created as transparent (free) in Google Calendar.
 - **Recurring events**: Office 365 sends recurring meetings as series with a recurrence rule (RRULE). These are created as real recurring events in Google Calendar via the Advanced Calendar API, so they show as a series and respect DST correctly. If an individual occurrence is deleted in Outlook, that specific instance is explicitly removed from the Google Calendar series. If an occurrence is rescheduled to a different time, the original slot is removed and a standalone event is created at the new time.
+- **Duplicate meeting detection**: If the same meeting is invited to multiple source accounts (e.g. you have two accounts in a shared meeting), it will only appear once in Google Calendar. The script detects events with the same UID across all config entries syncing into the same calendar, skips re-creation, and cleans up any duplicates that already exist (keeping the older copy).
 
 ## Troubleshooting
 

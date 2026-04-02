@@ -45,12 +45,20 @@ function syncSingleCalendar(config) {
   // Get target calendar
   const calendar = CalendarApp.getCalendarById(config.GOOGLE_CALENDAR_ID);
   
-  // Get existing synced events:
-  //   - Series masters via Advanced Calendar API (singleEvents: false)
-  //   - Individual/exception events via CalendarApp
-  const existingSeriesMasters = getExistingSeriesMasters(config.GOOGLE_CALENDAR_ID, config);
-  const existingSyncedEvents = getExistingSyncedEvents(config.GOOGLE_CALENDAR_ID, config);
-  console.log(`Found ${existingSeriesMasters.length} synced series, ${existingSyncedEvents.length} synced instances`);
+  // Fetch ALL synced events in the calendar, regardless of prefix.
+  // Checking across all configs prevents duplicate events when the same meeting
+  // exists in multiple source accounts (both synced into the same Google Calendar).
+  // "Owned" subsets (matching this config's prefix) are used exclusively for
+  // cleanup/deletion so each config only removes events it created.
+  const allSeriesMasters   = getExistingSeriesMasters(config.GOOGLE_CALENDAR_ID);
+  const allSyncedEvents    = getExistingSyncedEvents(config.GOOGLE_CALENDAR_ID);
+  const ownedSeriesMasters = allSeriesMasters.filter(s =>
+    s.summary && s.summary.includes(config.EVENT_TITLE_PREFIX)
+  );
+  const ownedSyncedEvents  = allSyncedEvents.filter(e =>
+    e.summary && e.summary.includes(config.EVENT_TITLE_PREFIX)
+  );
+  console.log(`Found ${ownedSeriesMasters.length} owned series (${allSeriesMasters.length} total), ${ownedSyncedEvents.length} owned instances (${allSyncedEvents.length} total)`);
 
   const processedTrackingIds = new Set();
   let addedCount = 0;
@@ -71,7 +79,8 @@ function syncSingleCalendar(config) {
     // the corresponding Google Calendar series occurrence first so the original
     // slot does not remain visible alongside the exception.
     if (icsEvent.recurrenceId && !icsEvent.rrule) {
-      const parentSeries = findSeriesByTrackingId(existingSeriesMasters, icsEvent.uid);
+      // Search all series (cross-prefix) — the parent may have been created by another config.
+      const parentSeries = findSeriesByTrackingId(allSeriesMasters, icsEvent.uid);
       if (parentSeries) deleteCancelledOccurrence(config.GOOGLE_CALENDAR_ID, parentSeries.id, icsEvent);
     }
 
@@ -87,18 +96,27 @@ function syncSingleCalendar(config) {
     if (icsEvent.rrule && !icsEvent.recurrenceId) {
       // Recurring series master — manage via Advanced Calendar API so Google Calendar
       // stores it as a real recurring event (respects DST, shows as series to the user).
-      const existingSeries = findSeriesByTrackingId(existingSeriesMasters, icsEvent.trackingId);
+      // Search all series (cross-prefix) so a meeting already present under another
+      // config's prefix is not recreated.
+      const existingSeries = findSeriesByTrackingId(allSeriesMasters, icsEvent.trackingId);
       if (existingSeries) {
-        if (updateRecurringSeriesIfChanged(existingSeries, icsEvent, config)) updatedCount++;
+        // Only update if this config owns the series; leave cross-config events alone.
+        if (existingSeries.summary && existingSeries.summary.includes(config.EVENT_TITLE_PREFIX)) {
+          if (updateRecurringSeriesIfChanged(existingSeries, icsEvent, config)) updatedCount++;
+        }
       } else {
         if (createRecurringGoogleEvent(config.GOOGLE_CALENDAR_ID, icsEvent, config)) addedCount++;
       }
     } else {
       // Single event or modified exception — create/update a standalone event.
       // The series occurrence for this slot was already removed above (if recurrenceId was set).
-      const existingEvent = findEventByUID(existingSyncedEvents, icsEvent.trackingId);
+      // Search all events (cross-prefix) to avoid duplicating a meeting already synced
+      // by another config entry.
+      const existingEvent = findEventByUID(allSyncedEvents, icsEvent.trackingId);
       if (existingEvent) {
-        if (updateEventIfChanged(existingEvent, icsEvent, config)) updatedCount++;
+        if (existingEvent.summary && existingEvent.summary.includes(config.EVENT_TITLE_PREFIX)) {
+          if (updateEventIfChanged(existingEvent, icsEvent, config)) updatedCount++;
+        }
       } else {
         if (createGoogleEvent(calendar, icsEvent, config)) addedCount++;
       }
@@ -108,9 +126,31 @@ function syncSingleCalendar(config) {
   // Delete recurring series that no longer exist in the ICS feed.
   let deletedCount = 0;
   const deletedSeriesIds = new Set();
-  existingSeriesMasters.forEach(series => {
+  ownedSeriesMasters.forEach(series => {
     const trackingId = extractUIDFromDescription(series.description);
-    if (trackingId && !processedTrackingIds.has(trackingId)) {
+    if (!trackingId) return;
+    // If another series with the same UID exists under a different prefix, this is a
+    // duplicate created when the same meeting appeared in multiple source accounts.
+    // Keep the older copy (by creation time); delete the newer one.
+    const crossConfigVersion = allSeriesMasters.find(s =>
+      s.id !== series.id && extractUIDFromDescription(s.description) === trackingId
+    );
+    if (crossConfigVersion) {
+      const thisCreated  = new Date(series.created             || 0).getTime();
+      const otherCreated = new Date(crossConfigVersion.created || 0).getTime();
+      if (thisCreated > otherCreated) {
+        try {
+          Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id);
+          deletedSeriesIds.add(trackingId);
+          deletedCount++;
+          console.log('Removed duplicate series (older copy exists under another prefix):', series.summary);
+        } catch (error) {
+          console.error('Error removing duplicate series:', error);
+        }
+      }
+      return; // skip normal feed-based deletion for cross-config UIDs
+    }
+    if (!processedTrackingIds.has(trackingId)) {
       try {
         Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id);
         deletedSeriesIds.add(trackingId); // prevent attempting to delete now-gone instances
@@ -126,9 +166,27 @@ function syncSingleCalendar(config) {
   // Skip instances whose parent series was already deleted above.
   // existingSyncedEvents contains only standalone API resources (no series instances),
   // so there is no risk of accidentally matching series occurrences here.
-  existingSyncedEvents.forEach(event => {
+  ownedSyncedEvents.forEach(event => {
     const trackingId = extractUIDFromDescription(event.description);
-    if (trackingId && !processedTrackingIds.has(trackingId) && !deletedSeriesIds.has(trackingId)) {
+    if (!trackingId || deletedSeriesIds.has(trackingId)) return;
+    const crossConfigVersion = allSyncedEvents.find(e =>
+      e.id !== event.id && extractUIDFromDescription(e.description) === trackingId
+    );
+    if (crossConfigVersion) {
+      const thisCreated  = new Date(event.created              || 0).getTime();
+      const otherCreated = new Date(crossConfigVersion.created || 0).getTime();
+      if (thisCreated > otherCreated) {
+        try {
+          Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, event.id);
+          deletedCount++;
+          console.log('Removed duplicate event (older copy exists under another prefix):', event.summary);
+        } catch (error) {
+          console.error('Error removing duplicate event:', error);
+        }
+      }
+      return;
+    }
+    if (!processedTrackingIds.has(trackingId)) {
       try {
         Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, event.id);
         deletedCount++;
@@ -413,7 +471,10 @@ function parseICSDateTime(dateTimeString, timezone) {
  * @param {Object} config     - Config entry.
  * @returns {Object[]} Array of Google Calendar API event resource objects.
  */
-function getExistingSyncedEvents(calendarId, config) {
+function getExistingSyncedEvents(calendarId) {
+  // No prefix filter — returns ALL synced standalone events so cross-config duplicates
+  // are detectable. The !recurringEventId filter ensures series occurrences (which
+  // inherit the master's [UID:] description) are never included.
   const startDate = new Date();
   startDate.setDate(startDate.getDate() - 30);
   startDate.setHours(0, 0, 0, 0);
@@ -428,7 +489,6 @@ function getExistingSyncedEvents(calendarId, config) {
     });
     return (result.items || []).filter(event =>
       !event.recurringEventId &&
-      event.summary && event.summary.includes(config.EVENT_TITLE_PREFIX) &&
       event.description && event.description.includes('[UID:')
     );
   } catch (error) {
@@ -518,7 +578,8 @@ function googleDateTime(date, timezone) {
  * @param {Object} config     - Config entry.
  * @returns {Object[]} Array of Google Calendar API event resource objects.
  */
-function getExistingSeriesMasters(calendarId, config) {
+function getExistingSeriesMasters(calendarId) {
+  // No prefix filter — returns ALL synced series so cross-config duplicates are detectable.
   // Use a wide lookback to catch series that started long ago but are still active.
   const fiveYearsAgo = new Date();
   fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5);
@@ -526,7 +587,6 @@ function getExistingSeriesMasters(calendarId, config) {
     const result = Calendar.Events.list(calendarId, {
       singleEvents: false,
       timeMin: fiveYearsAgo.toISOString(),
-      q: config.EVENT_TITLE_PREFIX,
       maxResults: 500
     });
     return (result.items || []).filter(event =>
