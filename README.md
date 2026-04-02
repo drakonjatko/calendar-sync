@@ -41,8 +41,11 @@ Only the busy/free status is transferred. All synced events appear with a generi
    - `Config.gs`
    - `Timezones.gs`
 3. In `Config.gs`, replace the placeholder values with your actual ICS URL, Google Calendar ID, and a title prefix for the synced events
-4. Click **Run → syncCalendar** once to authorize the required permissions (Google will prompt you to grant calendar access)
-5. Set up a time-based trigger:
+4. Enable the **Advanced Calendar Service**:
+   - Click **Services** (+ icon in the left sidebar)
+   - Find **Google Calendar API** and click **Add**
+5. Click **Run → syncCalendar** once to authorize the required permissions (Google will prompt you to grant calendar access)
+6. Set up a time-based trigger:
    - Click **Triggers** (clock icon in the left sidebar)
    - Add trigger → function `syncCalendar` → time-driven → every 15 or 30 minutes
 
@@ -66,7 +69,7 @@ Add more entries to the `CONFIG` array in `Config.gs` to sync additional Office 
 - **Updates**: If a synced event's time changes in Outlook, it will be updated on the next sync.
 - **Deletions**: If an event is removed from the Outlook feed, it will be deleted from Google Calendar on the next sync.
 - **Tentative events**: Events marked as tentative in Outlook are created as transparent (free) in Google Calendar.
-- **Recurring events**: The ICS feed from Office 365 expands recurring events into individual instances; they are synced as separate events.
+- **Recurring events**: Office 365 sends recurring meetings as series with a recurrence rule (RRULE). These are created as real recurring events in Google Calendar via the Advanced Calendar API, so they show as a series and respect DST correctly. Cancelled occurrences (individual deletions from a series) are explicitly removed from the Google Calendar series.
 
 ## Troubleshooting
 
@@ -83,6 +86,5 @@ Add more entries to the `CONFIG` array in `Config.gs` to sync additional Office 
 
 ## Known limitations
 
-- RFC 5545 line folding in ICS data is not supported. This is not an issue for Office 365 feeds in practice.
 - No bidirectional sync — changes made in Google Calendar are overwritten on the next sync.
 - All synced events get the same generic title; individual event names are intentionally not transferred.
