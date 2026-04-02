@@ -1,10 +1,18 @@
 /**
- * Microsoft Calendar to Google Calendar Sync
- * Syncs busy times only (no details provided in ICS)
+ * calendar-sync — Microsoft Outlook to Google Calendar
+ *
+ * Fetches busy times from Office 365 ICS feeds and mirrors them into
+ * Google Calendar. No event details (titles, attendees, descriptions)
+ * are transferred — only start/end times and busy status.
+ *
+ * Entry point: syncCalendar()
+ * Configuration: Config.gs
+ * Timezone mappings: Timezones.gs
  */
 
 /**
- * Main sync function — iterates over all CONFIG entries
+ * Runs a sync for every calendar source defined in CONFIG.
+ * Set this function as a time-based trigger (e.g. every 15 minutes).
  */
 function syncCalendar() {
   CONFIG.forEach((config, index) => {
@@ -18,7 +26,10 @@ function syncCalendar() {
 }
 
 /**
- * Sync a single calendar source defined by config
+ * Syncs one calendar source end-to-end:
+ * fetch ICS → parse events → diff against Google Calendar → create/update/delete.
+ *
+ * @param {Object} config - A single entry from the CONFIG array.
  */
 function syncSingleCalendar(config) {
   // Fetch and parse ICS data
@@ -78,7 +89,10 @@ function syncSingleCalendar(config) {
 }
 
 /**
- * Fetch ICS data from URL
+ * Downloads the ICS calendar feed from the given URL.
+ *
+ * @param {Object} config - Config entry containing ICS_URL.
+ * @returns {string|null} Raw ICS text, or null on error.
  */
 function fetchICSData(config) {
   try {
@@ -102,7 +116,12 @@ function fetchICSData(config) {
 }
 
 /**
- * Parse ICS events for today and future dates
+ * Parses raw ICS text into an array of event objects.
+ * Only events with a start time within the sync window (30 days ago to
+ * 1 year ahead) are returned. Events without a UID are skipped.
+ *
+ * @param {string} icsData - Raw ICS calendar text.
+ * @returns {Object[]} Array of parsed event objects.
  */
 function parseICSEvents(icsData) {
   const events = [];
@@ -120,8 +139,6 @@ function parseICSEvents(icsData) {
     } else if (line === 'END:VEVENT' && currentEvent) {
       if (currentEvent.startTime && currentEvent.startTime >= today && currentEvent.uid) {
         events.push(currentEvent);
-      } else {
-        console.log(currentEvent)
       }
       currentEvent = null;
     } else if (currentEvent && line.includes(':')) {
@@ -133,7 +150,13 @@ function parseICSEvents(icsData) {
 }
 
 /**
- * Parse individual event properties (only time and UID needed)
+ * Extracts a single ICS property from a VEVENT line and writes it onto
+ * the event object. Handles parameterized properties (e.g. DTSTART;TZID=...).
+ * RRULE lines are intentionally ignored — the Office 365 feed expands
+ * recurring events into individual instances.
+ *
+ * @param {string} line  - A single ICS content line.
+ * @param {Object} event - The event object being built.
  */
 function parseEventProperty(line, event) {
   const colonIndex = line.indexOf(':');
@@ -174,7 +197,8 @@ function parseEventProperty(line, event) {
 }
 
 /**
- * Extract timezone from property parameters
+ * Returns the TZID parameter value from a parsed property parameter map,
+ * or null if not present.
  */
 function extractTimezone(propertyParams) {
   return propertyParams.TZID || null;
@@ -192,7 +216,23 @@ function pad(n) {
 }
 
 /**
- * Convert from specific timezone to UTC
+ * Constructs a UTC Date from a local wall-clock time in a given Microsoft timezone.
+ *
+ * Google Apps Script's Date constructor treats bare ISO strings as local time,
+ * which is unreliable in a server environment. The workaround is:
+ *   1. Construct a rough local Date to let Utilities.formatDate() calculate the
+ *      correct UTC offset for that instant (accounting for DST).
+ *   2. Build a full ISO 8601 string with that offset appended.
+ *   3. Parse it with new Date() — the explicit offset makes the result correct.
+ *
+ * @param {number} year
+ * @param {number} month  - 0-based (0 = January).
+ * @param {number} day
+ * @param {number} hour
+ * @param {number} minute
+ * @param {number} second
+ * @param {string} timezone - Microsoft timezone name (e.g. 'W. Europe Standard Time').
+ * @returns {Date} UTC Date object.
  */
 function buildDate(year, month, day, hour, minute, second, timezone) {
   const tz = convertMicrosoftTimezone(timezone);
@@ -203,12 +243,20 @@ function buildDate(year, month, day, hour, minute, second, timezone) {
     `${year}-${pad(month+1)}-${pad(day)}T` +
     `${pad(hour)}:${pad(minute)}:${pad(second)}${offset}`;
 
-  console.log(timezone, iso, new Date(iso))
   return new Date(iso);
 }
 
 /**
- * Parse ICS datetime
+ * Converts an ICS datetime string to a JavaScript Date.
+ *
+ * Handles three formats:
+ *   - Date-only (YYYYMMDD): returned as a local midnight Date (all-day event).
+ *   - UTC datetime (YYYYMMDDTHHmmssZ): parsed directly as UTC.
+ *   - Local datetime with TZID param (YYYYMMDDTHHmmss): converted via buildDate().
+ *
+ * @param {string} dateTimeString - ICS datetime value.
+ * @param {string|null} timezone  - Microsoft timezone name from the TZID parameter, or null.
+ * @returns {Date}
  */
 function parseICSDateTime(dateTimeString, timezone) {
   if (!dateTimeString.includes('T')) {
@@ -240,12 +288,19 @@ function parseICSDateTime(dateTimeString, timezone) {
 }
 
 /**
- * Get existing synced events from today onwards
+ * Fetches all previously synced events from the target Google Calendar
+ * within the sync window. Synced events are identified by:
+ *   - Title containing EVENT_TITLE_PREFIX
+ *   - Description containing a [UID:...] marker written by this script
+ *
+ * @param {Calendar} calendar - GoogleAppsScript Calendar object.
+ * @param {Object} config     - Config entry.
+ * @returns {CalendarEvent[]} Array of matching Google Calendar events.
  */
 function getExistingSyncedEvents(calendar, config) {
   const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 30); // Go back 1 day
-  startDate.setHours(0, 0, 0, 0); // Set to start of yesterday
+  startDate.setDate(startDate.getDate() - 30);
+  startDate.setHours(0, 0, 0, 0);
 
   const futureDate = new Date();
   futureDate.setFullYear(futureDate.getFullYear() + 1);
@@ -259,7 +314,12 @@ function getExistingSyncedEvents(calendar, config) {
 }
 
 /**
- * Find existing event by UID
+ * Finds a previously synced Google Calendar event whose description contains
+ * the given Microsoft UID marker.
+ *
+ * @param {CalendarEvent[]} existingEvents
+ * @param {string} uid
+ * @returns {CalendarEvent|undefined}
  */
 function findEventByUID(existingEvents, uid) {
   return existingEvents.find(event => {
@@ -269,7 +329,11 @@ function findEventByUID(existingEvents, uid) {
 }
 
 /**
- * Extract UID from event description
+ * Extracts the Microsoft event UID from a Google Calendar event description.
+ * Returns null if the description is missing or does not contain a [UID:...] marker.
+ *
+ * @param {string|null} description
+ * @returns {string|null}
  */
 function extractUIDFromDescription(description) {
   if (!description) return null;
@@ -278,7 +342,14 @@ function extractUIDFromDescription(description) {
 }
 
 /**
- * Create new Google Calendar event
+ * Creates a new event in the target Google Calendar from a parsed ICS event.
+ * The event description always includes [UID:...] so future syncs can
+ * identify and update or delete the event.
+ *
+ * @param {Calendar} calendar  - Target GoogleAppsScript Calendar.
+ * @param {Object} icsEvent    - Parsed ICS event object.
+ * @param {Object} config      - Config entry.
+ * @returns {boolean} True on success, false on error.
  */
 function createGoogleEvent(calendar, icsEvent, config) {
   try {
@@ -315,7 +386,13 @@ function createGoogleEvent(calendar, icsEvent, config) {
 }
 
 /**
- * Update existing event if time changed
+ * Updates the start/end time of an existing Google Calendar event if it
+ * has changed in the ICS feed. No-op if times are identical.
+ *
+ * @param {CalendarEvent} googleEvent - Existing synced event.
+ * @param {Object} icsEvent           - Updated ICS event.
+ * @param {Object} config             - Config entry (used for logging).
+ * @returns {boolean} True if the event was updated, false otherwise.
  */
 function updateEventIfChanged(googleEvent, icsEvent, config) {
   try {

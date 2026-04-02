@@ -1,5 +1,15 @@
 /**
- * Convert Microsoft timezone names to IANA timezone names
+ * Maps Microsoft Windows timezone names to IANA timezone identifiers.
+ *
+ * Office 365 ICS feeds use Windows timezone names (e.g. "W. Europe Standard Time")
+ * in TZID parameters. Google Apps Script's Utilities.formatDate() requires IANA
+ * names (e.g. "Europe/Berlin"). This function performs that conversion.
+ *
+ * If a timezone name is not found in the map, it is returned unchanged
+ * (useful for feeds that already use IANA names or UTC).
+ *
+ * @param {string} msTimezone - Windows timezone name from an ICS TZID parameter.
+ * @returns {string} Corresponding IANA timezone name, or the input unchanged.
  */
 function convertMicrosoftTimezone(msTimezone) {
   const timezoneMap = {
