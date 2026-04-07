@@ -70,7 +70,7 @@ function syncSingleCalendar(config) {
 
     // Skip all-day events entirely.
     if (icsEvent.isAllDay) {
-      console.log('SKIP all-day trackingId:', icsEvent.trackingId);
+      if (LOG_SKIPPED_EVENTS) console.log('SKIP all-day trackingId:', icsEvent.trackingId);
       return;
     }
 
@@ -87,7 +87,7 @@ function syncSingleCalendar(config) {
     // Skip cancelled events. By not adding their trackingId to processedTrackingIds,
     // any previously synced standalone version is cleaned up in the deletion pass below.
     if (icsEvent.status === 'CANCELLED') {
-      console.log('SKIP cancelled trackingId:', icsEvent.trackingId);
+      if (LOG_SKIPPED_EVENTS) console.log('SKIP cancelled trackingId:', icsEvent.trackingId);
       return;
     }
 
@@ -264,13 +264,13 @@ function parseICSEvents(icsData) {
       currentEvent = {};
     } else if (line === 'END:VEVENT' && currentEvent) {
       if (!currentEvent.uid) {
-        console.log('SKIP no-uid:', JSON.stringify(currentEvent));
+        if (LOG_SKIPPED_EVENTS) console.log('SKIP no-uid:', JSON.stringify(currentEvent));
       } else if (!currentEvent.startTime) {
-        console.log('SKIP no-startTime uid:', currentEvent.uid);
+        if (LOG_SKIPPED_EVENTS) console.log('SKIP no-startTime uid:', currentEvent.uid);
       } else if (!currentEvent.rrule && currentEvent.startTime < today) {
         // Series masters have their original DTSTART (potentially years ago) but their
         // future occurrences still matter — skip the date filter for them.
-        console.log('SKIP too-old uid:', currentEvent.uid, 'start:', currentEvent.startTime);
+        if (LOG_SKIPPED_EVENTS) console.log('SKIP too-old uid:', currentEvent.uid, 'start:', currentEvent.startTime);
       } else {
         if (currentEvent.rrule && !currentEvent.recurrenceId) {
           // Series master — track by uid alone (represents the whole series).
@@ -282,7 +282,7 @@ function parseICSEvents(icsData) {
           // Single event — track by uid + start time.
           currentEvent.trackingId = currentEvent.uid + '|' + currentEvent.dtStartRaw;
         }
-        console.log('PARSED event trackingId:', currentEvent.trackingId, 'start:', currentEvent.startTime, 'status:', currentEvent.status || 'none', 'isAllDay:', !!currentEvent.isAllDay, 'rrule:', currentEvent.rrule || 'none');
+        if (LOG_PARSED_EVENTS) console.log('PARSED event trackingId:', currentEvent.trackingId, 'start:', currentEvent.startTime, 'status:', currentEvent.status || 'none', 'isAllDay:', !!currentEvent.isAllDay, 'rrule:', currentEvent.rrule || 'none');
         events.push(currentEvent);
       }
       currentEvent = null;
@@ -761,7 +761,7 @@ function deleteCancelledOccurrence(calendarId, seriesId, exceptionIcsEvent) {
       Calendar.Events.remove(calendarId, instance.id);
       console.log('Removed cancelled occurrence:', cancelledIcsEvent.recurrenceId);
     } else {
-      console.log('Cancelled occurrence not found in series (already removed?):', cancelledIcsEvent.recurrenceId);
+      if (LOG_SKIPPED_EVENTS) console.log('Cancelled occurrence not found in series (already removed?):', cancelledIcsEvent.recurrenceId);
     }
   } catch (error) {
     console.error('Error removing cancelled occurrence:', error);

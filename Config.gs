@@ -12,6 +12,20 @@
  *   Google Calendar → calendar settings → Integrate calendar → Calendar ID
  *   Looks like "abc123...@group.calendar.google.com" for secondary calendars.
  */
+/**
+ * Logging verbosity flags.
+ *
+ * LOG_SKIPPED_EVENTS — log every event that is filtered out during ICS parsing
+ *   (no UID, no start time, too old, all-day, cancelled). Useful when events
+ *   are unexpectedly missing from Google Calendar.
+ *
+ * LOG_PARSED_EVENTS — log every VEVENT accepted by the parser with its
+ *   trackingId, start time, status, and recurrence info. Useful for verifying
+ *   the ICS feed is being read correctly.
+ */
+const LOG_SKIPPED_EVENTS = false;
+const LOG_PARSED_EVENTS  = false;
+
 const CONFIG = [
   {
     // Office 365 ICS export link (get from Outlook Web → calendar sharing settings)
