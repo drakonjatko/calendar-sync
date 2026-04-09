@@ -8,9 +8,9 @@ Google Apps Script project that syncs busy times from Microsoft Outlook (Office 
 Office 365 ICS Feed → fetchICSData() → parseICSEvents() → diff with Google Calendar → create/update/delete
 ```
 
-- **Entry point**: `syncCalendar()` in [code.gs](../code.gs) — iterates over `CONFIG` and calls `syncSingleCalendar()` per source
+- **Entry point**: `syncCalendar()` in [Code.gs](../Code.gs) — iterates over `CONFIG` and calls `syncSingleCalendar()` per source
 - **Config**: [Config.gs](../Config.gs) — `CONFIG` array of `{ ICS_URL, GOOGLE_CALENDAR_ID, EVENT_TITLE_PREFIX, NOTIFICATION_MINUTES }` objects
-- **Timezone map**: [Timezones.gs](../Timezones.gs) — 156 Microsoft → IANA timezone name mappings
+- **Timezone map**: [Timezones.gs](../Timezones.gs) — 100 Microsoft → IANA timezone name mappings
 
 ## Deployment
 

@@ -37,7 +37,7 @@ Only the busy/free status is transferred. All synced events appear with a generi
 
 1. Go to [script.google.com](https://script.google.com) and create a new project
 2. Create three script files and paste the contents of each `.gs` file:
-   - `code.gs`
+   - `Code.gs`
    - `Config.gs`
    - `Timezones.gs`
 3. In `Config.gs`, replace the placeholder values with your actual ICS URL, Google Calendar ID, and a title prefix for the synced events

@@ -34,8 +34,7 @@ const CONFIG = [
     // ID of the target Google Calendar
     GOOGLE_CALENDAR_ID: '...@group.calendar.google.com',
 
-    // Prefix used for all synced event titles.
-    // Timed events → "{PREFIX} meeting", all-day events → "{PREFIX} - FREE"
+    // Prefix used for all synced event titles (timed events → "{PREFIX} meeting")
     EVENT_TITLE_PREFIX: 'Work',
 
     // Minutes before the event to show a popup reminder (0 to disable)
