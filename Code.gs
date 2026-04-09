@@ -303,9 +303,9 @@ function parseICSEvents(icsData) {
  */
 function parseEventProperty(line, event) {
   const colonIndex = line.indexOf(':');
-  property = line.substring(0, colonIndex);
+  let property = line.substring(0, colonIndex);
   const value = line.substring(colonIndex + 1);
-  const propertyParams = []
+  const propertyParams = {};
   if (property.includes(';')) {
     const parts = property.split(';');
     property = parts[0]; // Main property name (e.g., "DTSTART")
@@ -468,7 +468,6 @@ function parseICSDateTime(dateTimeString, timezone) {
  * and would otherwise cause phantom duplicates in the cleanup pass.
  *
  * @param {string} calendarId - Target Google Calendar ID.
- * @param {Object} config     - Config entry.
  * @returns {Object[]} Array of Google Calendar API event resource objects.
  */
 function getExistingSyncedEvents(calendarId) {
@@ -575,7 +574,6 @@ function googleDateTime(date, timezone) {
  *   Apps Script editor → Services → Google Calendar API.
  *
  * @param {string} calendarId - Target Google Calendar ID.
- * @param {Object} config     - Config entry.
  * @returns {Object[]} Array of Google Calendar API event resource objects.
  */
 function getExistingSeriesMasters(calendarId) {
