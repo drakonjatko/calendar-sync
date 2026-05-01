@@ -479,14 +479,22 @@ function getExistingSyncedEvents(calendarId) {
   startDate.setHours(0, 0, 0, 0);
   const futureDate = new Date();
   futureDate.setFullYear(futureDate.getFullYear() + 1);
+  const allItems = [];
+  let pageToken = null;
   try {
-    const result = Calendar.Events.list(calendarId, {
-      singleEvents: true,
-      timeMin: startDate.toISOString(),
-      timeMax: futureDate.toISOString(),
-      maxResults: 2500
-    });
-    return (result.items || []).filter(event =>
+    do {
+      const params = {
+        singleEvents: true,
+        timeMin: startDate.toISOString(),
+        timeMax: futureDate.toISOString(),
+        maxResults: 2500
+      };
+      if (pageToken) params.pageToken = pageToken;
+      const result = Calendar.Events.list(calendarId, params);
+      (result.items || []).forEach(event => allItems.push(event));
+      pageToken = result.nextPageToken || null;
+    } while (pageToken);
+    return allItems.filter(event =>
       !event.recurringEventId &&
       event.description && event.description.includes('[UID:')
     );
@@ -581,13 +589,21 @@ function getExistingSeriesMasters(calendarId) {
   // Use a wide lookback to catch series that started long ago but are still active.
   const fiveYearsAgo = new Date();
   fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5);
+  const allItems = [];
+  let pageToken = null;
   try {
-    const result = Calendar.Events.list(calendarId, {
-      singleEvents: false,
-      timeMin: fiveYearsAgo.toISOString(),
-      maxResults: 500
-    });
-    return (result.items || []).filter(event =>
+    do {
+      const params = {
+        singleEvents: false,
+        timeMin: fiveYearsAgo.toISOString(),
+        maxResults: 500
+      };
+      if (pageToken) params.pageToken = pageToken;
+      const result = Calendar.Events.list(calendarId, params);
+      (result.items || []).forEach(event => allItems.push(event));
+      pageToken = result.nextPageToken || null;
+    } while (pageToken);
+    return allItems.filter(event =>
       event.recurrence &&
       event.description &&
       event.description.includes('[UID:')
