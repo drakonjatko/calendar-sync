@@ -32,19 +32,15 @@ function syncCalendar() {
  * @param {Object} config - A single entry from the CONFIG array.
  */
 function syncSingleCalendar(config) {
-  // Fetch and parse ICS data
   const icsData = fetchICSData(config);
   if (!icsData) {
     console.error('Failed to fetch ICS data');
     return;
   }
-  
+
   const icsEvents = parseICSEvents(icsData);
   console.log(`Found ${icsEvents.length} busy slots in ICS feed`);
-  
-  // Get target calendar
-  const calendar = CalendarApp.getCalendarById(config.GOOGLE_CALENDAR_ID);
-  
+
   // Fetch ALL synced events in the calendar, regardless of prefix.
   // Checking across all configs prevents duplicate events when the same meeting
   // exists in multiple source accounts (both synced into the same Google Calendar).
@@ -60,11 +56,15 @@ function syncSingleCalendar(config) {
   );
   console.log(`Found ${ownedSeriesMasters.length} owned series (${allSeriesMasters.length} total), ${ownedSyncedEvents.length} owned instances (${allSyncedEvents.length} total)`);
 
+  // Index all events by trackingId for O(1) lookups and O(n) cross-config duplicate detection.
+  const allSeriesByTid = buildTrackingIdMap(allSeriesMasters);
+  const allEventsByTid = buildTrackingIdMap(allSyncedEvents);
+
   const processedTrackingIds = new Set();
   let addedCount = 0;
   let updatedCount = 0;
 
-  // Create or update events from ICS
+  // Create or update events from ICS.
   icsEvents.forEach(icsEvent => {
     if (!icsEvent.uid) return;
 
@@ -80,7 +80,7 @@ function syncSingleCalendar(config) {
     // slot does not remain visible alongside the exception.
     if (icsEvent.recurrenceId && !icsEvent.rrule) {
       // Search all series (cross-prefix) — the parent may have been created by another config.
-      const parentSeries = findSeriesByTrackingId(allSeriesMasters, icsEvent.uid);
+      const parentSeries = (allSeriesByTid.get(icsEvent.uid) || [])[0];
       if (parentSeries) deleteCancelledOccurrence(config.GOOGLE_CALENDAR_ID, parentSeries.id, icsEvent);
     }
 
@@ -98,7 +98,7 @@ function syncSingleCalendar(config) {
       // stores it as a real recurring event (respects DST, shows as series to the user).
       // Search all series (cross-prefix) so a meeting already present under another
       // config's prefix is not recreated.
-      const existingSeries = findSeriesByTrackingId(allSeriesMasters, icsEvent.trackingId);
+      const existingSeries = (allSeriesByTid.get(icsEvent.trackingId) || [])[0];
       if (existingSeries) {
         // Only update if this config owns the series; leave cross-config events alone.
         if (existingSeries.summary && existingSeries.summary.includes(config.EVENT_TITLE_PREFIX)) {
@@ -112,36 +112,32 @@ function syncSingleCalendar(config) {
       // The series occurrence for this slot was already removed above (if recurrenceId was set).
       // Search all events (cross-prefix) to avoid duplicating a meeting already synced
       // by another config entry.
-      const existingEvent = findEventByUID(allSyncedEvents, icsEvent.trackingId);
+      const existingEvent = (allEventsByTid.get(icsEvent.trackingId) || [])[0];
       if (existingEvent) {
         if (existingEvent.summary && existingEvent.summary.includes(config.EVENT_TITLE_PREFIX)) {
           if (updateEventIfChanged(existingEvent, icsEvent, config)) updatedCount++;
         }
       } else {
-        if (createGoogleEvent(calendar, icsEvent, config)) addedCount++;
+        if (createGoogleEvent(config.GOOGLE_CALENDAR_ID, icsEvent, config)) addedCount++;
       }
     }
   });
 
   // Delete recurring series that no longer exist in the ICS feed.
   let deletedCount = 0;
-  const deletedSeriesIds = new Set();
   ownedSeriesMasters.forEach(series => {
     const trackingId = extractUIDFromDescription(series.description);
     if (!trackingId) return;
     // If another series with the same UID exists under a different prefix, this is a
     // duplicate created when the same meeting appeared in multiple source accounts.
     // Keep the older copy (by creation time); delete the newer one.
-    const crossConfigVersion = allSeriesMasters.find(s =>
-      s.id !== series.id && extractUIDFromDescription(s.description) === trackingId
-    );
+    const crossConfigVersion = (allSeriesByTid.get(trackingId) || []).find(s => s.id !== series.id);
     if (crossConfigVersion) {
       const thisCreated  = new Date(series.created             || 0).getTime();
       const otherCreated = new Date(crossConfigVersion.created || 0).getTime();
       if (thisCreated > otherCreated) {
         try {
           Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id);
-          deletedSeriesIds.add(trackingId);
           deletedCount++;
           console.log('Removed duplicate series (older copy exists under another prefix):', series.summary);
         } catch (error) {
@@ -153,7 +149,6 @@ function syncSingleCalendar(config) {
     if (!processedTrackingIds.has(trackingId)) {
       try {
         Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id);
-        deletedSeriesIds.add(trackingId); // prevent attempting to delete now-gone instances
         deletedCount++;
         console.log('Deleted series:', series.summary);
       } catch (error) {
@@ -163,15 +158,12 @@ function syncSingleCalendar(config) {
   });
 
   // Delete individual/exception events that no longer exist in the ICS feed.
-  // Skip instances whose parent series was already deleted above.
-  // existingSyncedEvents contains only standalone API resources (no series instances),
+  // getExistingSyncedEvents returns only standalone API resources (no series instances),
   // so there is no risk of accidentally matching series occurrences here.
   ownedSyncedEvents.forEach(event => {
     const trackingId = extractUIDFromDescription(event.description);
-    if (!trackingId || deletedSeriesIds.has(trackingId)) return;
-    const crossConfigVersion = allSyncedEvents.find(e =>
-      e.id !== event.id && extractUIDFromDescription(e.description) === trackingId
-    );
+    if (!trackingId) return;
+    const crossConfigVersion = (allEventsByTid.get(trackingId) || []).find(e => e.id !== event.id);
     if (crossConfigVersion) {
       const thisCreated  = new Date(event.created              || 0).getTime();
       const otherCreated = new Date(crossConfigVersion.created || 0).getTime();
@@ -254,9 +246,9 @@ function parseICSEvents(icsData) {
   }
 
   let currentEvent = null;
-  const today = new Date();
-  today.setDate(today.getDate() - 30)
-  today.setHours(0, 0, 0, 0);
+  const syncWindowStart = new Date();
+  syncWindowStart.setDate(syncWindowStart.getDate() - 30);
+  syncWindowStart.setHours(0, 0, 0, 0);
   
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();    
@@ -267,7 +259,7 @@ function parseICSEvents(icsData) {
         if (LOG_SKIPPED_EVENTS) console.log('SKIP no-uid:', JSON.stringify(currentEvent));
       } else if (!currentEvent.startTime) {
         if (LOG_SKIPPED_EVENTS) console.log('SKIP no-startTime uid:', currentEvent.uid);
-      } else if (!currentEvent.rrule && currentEvent.startTime < today) {
+      } else if (!currentEvent.rrule && currentEvent.startTime < syncWindowStart) {
         // Series masters have their original DTSTART (potentially years ago) but their
         // future occurrences still matter — skip the date filter for them.
         if (LOG_SKIPPED_EVENTS) console.log('SKIP too-old uid:', currentEvent.uid, 'start:', currentEvent.startTime);
@@ -504,19 +496,6 @@ function getExistingSyncedEvents(calendarId) {
   }
 }
 
-/**
- * Finds a previously synced Google Calendar event whose description contains
- * the given Microsoft UID marker.
- *
- * @param {Object[]} existingEvents - API event resources from getExistingSyncedEvents.
- * @param {string} uid
- * @returns {Object|undefined}
- */
-function findEventByUID(existingEvents, uid) {
-  return existingEvents.find(event =>
-    extractUIDFromDescription(event.description) === uid
-  );
-}
 
 /**
  * Extracts the Microsoft event UID from a Google Calendar event description.
@@ -529,6 +508,35 @@ function extractUIDFromDescription(description) {
   if (!description) return null;
   const match = description.match(/\[UID:([^\]]+)\]/);
   return match ? match[1] : null;
+}
+
+/**
+ * Returns true if the ICS event should be marked as free/transparent in Google Calendar.
+ *
+ * @param {Object} icsEvent
+ * @returns {boolean}
+ */
+function isTentative(icsEvent) {
+  return icsEvent.busyStatus === 'TENTATIVE' || icsEvent.status === 'TENTATIVE';
+}
+
+/**
+ * Indexes a list of Google Calendar API event resources by their [UID:...] trackingId.
+ * Each map entry is an array so that cross-config duplicates (same UID, different event)
+ * are all reachable.
+ *
+ * @param {Object[]} events
+ * @returns {Map<string, Object[]>}
+ */
+function buildTrackingIdMap(events) {
+  const map = new Map();
+  events.forEach(event => {
+    const tid = extractUIDFromDescription(event.description);
+    if (!tid) return;
+    if (!map.has(tid)) map.set(tid, []);
+    map.get(tid).push(event);
+  });
+  return map;
 }
 
 /**
@@ -587,8 +595,11 @@ function googleDateTime(date, timezone) {
 function getExistingSeriesMasters(calendarId) {
   // No prefix filter — returns ALL synced series so cross-config duplicates are detectable.
   // Use a wide lookback to catch series that started long ago but are still active.
+  // timeMax caps the range at the sync window end to avoid loading far-future series.
   const fiveYearsAgo = new Date();
   fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5);
+  const oneYearAhead = new Date();
+  oneYearAhead.setFullYear(oneYearAhead.getFullYear() + 1);
   const allItems = [];
   let pageToken = null;
   try {
@@ -596,6 +607,7 @@ function getExistingSeriesMasters(calendarId) {
       const params = {
         singleEvents: false,
         timeMin: fiveYearsAgo.toISOString(),
+        timeMax: oneYearAhead.toISOString(),
         maxResults: 500
       };
       if (pageToken) params.pageToken = pageToken;
@@ -614,16 +626,6 @@ function getExistingSeriesMasters(calendarId) {
   }
 }
 
-/**
- * Finds a synced recurring series whose [UID:...] description marker matches the given trackingId.
- *
- * @param {Object[]} seriesMasters - Array of Google Calendar API event resources.
- * @param {string}   trackingId
- * @returns {Object|undefined}
- */
-function findSeriesByTrackingId(seriesMasters, trackingId) {
-  return seriesMasters.find(series => extractUIDFromDescription(series.description) === trackingId);
-}
 
 /**
  * Creates a new recurring event series in Google Calendar using the Advanced Calendar API.
@@ -644,9 +646,10 @@ function createRecurringGoogleEvent(calendarId, icsEvent, config) {
     Calendar.Events.insert({
       summary: `${config.EVENT_TITLE_PREFIX} meeting`,
       description: `Synced from Microsoft Calendar\n[UID:${icsEvent.trackingId}]`,
-      start: googleDateTime(icsEvent.startTime, icsEvent.timezone),
-      end:   googleDateTime(icsEvent.endTime,   icsEvent.timezone),
-      recurrence: recurrence,
+      start:        googleDateTime(icsEvent.startTime, icsEvent.timezone),
+      end:          googleDateTime(icsEvent.endTime,   icsEvent.timezone),
+      recurrence:   recurrence,
+      transparency: isTentative(icsEvent) ? 'transparent' : 'opaque',
       reminders: {
         useDefault: false,
         overrides: [{ method: 'popup', minutes: config.NOTIFICATION_MINUTES }]
@@ -671,20 +674,24 @@ function createRecurringGoogleEvent(calendarId, icsEvent, config) {
  */
 function updateRecurringSeriesIfChanged(seriesEvent, icsEvent, config) {
   try {
-    const currentStart = new Date(seriesEvent.start.dateTime || seriesEvent.start.date);
-    const currentEnd   = new Date(seriesEvent.end.dateTime   || seriesEvent.end.date);
-    const currentRRule = (seriesEvent.recurrence || []).find(r => r.startsWith('RRULE:')) || '';
+    const currentStart        = new Date(seriesEvent.start.dateTime || seriesEvent.start.date);
+    const currentEnd          = new Date(seriesEvent.end.dateTime   || seriesEvent.end.date);
+    const currentRRule        = (seriesEvent.recurrence || []).find(r => r.startsWith('RRULE:')) || '';
+    const newTransparency     = isTentative(icsEvent) ? 'transparent' : 'opaque';
+    const currentTransparency = seriesEvent.transparency || 'opaque';
 
-    const startChanged  = currentStart.getTime() !== icsEvent.startTime.getTime();
-    const endChanged    = currentEnd.getTime()   !== icsEvent.endTime.getTime();
-    const rruleChanged  = currentRRule           !== icsEvent.rrule;
+    const startChanged        = currentStart.getTime() !== icsEvent.startTime.getTime();
+    const endChanged          = currentEnd.getTime()   !== icsEvent.endTime.getTime();
+    const rruleChanged        = currentRRule           !== icsEvent.rrule;
+    const transparencyChanged = currentTransparency    !== newTransparency;
 
-    if (!startChanged && !endChanged && !rruleChanged) return false;
+    if (!startChanged && !endChanged && !rruleChanged && !transparencyChanged) return false;
 
     Calendar.Events.patch({
-      start:      googleDateTime(icsEvent.startTime, icsEvent.timezone),
-      end:        googleDateTime(icsEvent.endTime,   icsEvent.timezone),
-      recurrence: buildRecurrence(icsEvent)
+      start:        googleDateTime(icsEvent.startTime, icsEvent.timezone),
+      end:          googleDateTime(icsEvent.endTime,   icsEvent.timezone),
+      recurrence:   buildRecurrence(icsEvent),
+      transparency: newTransparency
     }, config.GOOGLE_CALENDAR_ID, seriesEvent.id);
     console.log('Updated series:', config.EVENT_TITLE_PREFIX, 'starting', icsEvent.startTime);
     return true;
@@ -695,42 +702,30 @@ function updateRecurringSeriesIfChanged(seriesEvent, icsEvent, config) {
 }
 
 /**
- * Creates a new event in the target Google Calendar from a parsed ICS event.
- * The event description always includes [UID:...] so future syncs can
- * identify and update or delete the event.
+ * Creates a new standalone event in the target Google Calendar from a parsed ICS event.
+ * Uses the Advanced Calendar API (same as recurring events) so transparency and reminders
+ * can be set in a single call without a separate CalendarApp lookup.
  *
- * @param {Calendar} calendar  - Target GoogleAppsScript Calendar.
- * @param {Object} icsEvent    - Parsed ICS event object.
- * @param {Object} config      - Config entry.
+ * @param {string} calendarId - Target Google Calendar ID.
+ * @param {Object} icsEvent   - Parsed ICS event object.
+ * @param {Object} config     - Config entry.
  * @returns {boolean} True on success, false on error.
  */
-function createGoogleEvent(calendar, icsEvent, config) {
+function createGoogleEvent(calendarId, icsEvent, config) {
   try {
-    const description = `Synced from Microsoft Calendar\n[UID:${icsEvent.trackingId}]`;
-    // All-day events are filtered out before this function is called.
-    const title = `${config.EVENT_TITLE_PREFIX} meeting`;
-    
-    const newEvent = calendar.createEvent(
-      title,
-      icsEvent.startTime,
-      icsEvent.endTime,
-      {
-        description: description
+    Calendar.Events.insert({
+      summary:      `${config.EVENT_TITLE_PREFIX} meeting`,
+      description:  `Synced from Microsoft Calendar\n[UID:${icsEvent.trackingId}]`,
+      start:        { dateTime: icsEvent.startTime.toISOString() },
+      end:          { dateTime: icsEvent.endTime.toISOString() },
+      transparency: isTentative(icsEvent) ? 'transparent' : 'opaque',
+      reminders: {
+        useDefault: false,
+        overrides: [{ method: 'popup', minutes: config.NOTIFICATION_MINUTES }]
       }
-    );
-
-    // Set Google Calendar status based on Microsoft status
-    if (icsEvent.busyStatus === 'TENTATIVE' || icsEvent.status === 'TENTATIVE') {
-      // Google Calendar doesn't have direct "tentative" but we can use transparency
-      newEvent.setTransparency(CalendarApp.EventTransparency.TRANSPARENT);
-    }
-    
-    // Add 5-minute notification
-    newEvent.addPopupReminder(config.NOTIFICATION_MINUTES);
-    
+    }, calendarId);
     console.log('Created event:', config.EVENT_TITLE_PREFIX, 'at', icsEvent.startTime);
     return true;
-    
   } catch (error) {
     console.error('Error creating event:', error);
     return false;
@@ -753,11 +748,10 @@ function deleteCancelledOccurrence(calendarId, seriesId, exceptionIcsEvent) {
   // Prefer the TZID from the RECURRENCE-ID property itself; fall back to the
   // event's DTSTART timezone so floating RECURRENCE-ID values are resolved
   // correctly instead of being treated as GAS server local time.
-  const cancelledIcsEvent = exceptionIcsEvent; // kept for internal readability
   try {
-    const tzid = cancelledIcsEvent.recurrenceTzid || cancelledIcsEvent.timezone || null;
+    const tzid = exceptionIcsEvent.recurrenceTzid || exceptionIcsEvent.timezone || null;
     const originalTime = parseICSDateTime(
-      cancelledIcsEvent.recurrenceId,
+      exceptionIcsEvent.recurrenceId,
       tzid
     );
     const result = Calendar.Events.instances(calendarId, seriesId, {
@@ -773,9 +767,9 @@ function deleteCancelledOccurrence(calendarId, seriesId, exceptionIcsEvent) {
     });
     if (instance) {
       Calendar.Events.remove(calendarId, instance.id);
-      console.log('Removed cancelled occurrence:', cancelledIcsEvent.recurrenceId);
+      console.log('Removed cancelled occurrence:', exceptionIcsEvent.recurrenceId);
     } else {
-      if (LOG_SKIPPED_EVENTS) console.log('Cancelled occurrence not found in series (already removed?):', cancelledIcsEvent.recurrenceId);
+      if (LOG_SKIPPED_EVENTS) console.log('Cancelled occurrence not found in series (already removed?):', exceptionIcsEvent.recurrenceId);
     }
   } catch (error) {
     console.error('Error removing cancelled occurrence:', error);
@@ -795,17 +789,23 @@ function deleteCancelledOccurrence(calendarId, seriesId, exceptionIcsEvent) {
  */
 function updateEventIfChanged(googleEvent, icsEvent, config) {
   try {
-    const currentStart = new Date(googleEvent.start.dateTime || googleEvent.start.date);
-    const currentEnd   = new Date(googleEvent.end.dateTime   || googleEvent.end.date);
-    if (currentStart.getTime() === icsEvent.startTime.getTime() &&
-        currentEnd.getTime()   === icsEvent.endTime.getTime()) {
-      return false;
-    }
+    const currentStart        = new Date(googleEvent.start.dateTime || googleEvent.start.date);
+    const currentEnd          = new Date(googleEvent.end.dateTime   || googleEvent.end.date);
+    const newTransparency     = isTentative(icsEvent) ? 'transparent' : 'opaque';
+    const currentTransparency = googleEvent.transparency || 'opaque';
+
+    const startChanged        = currentStart.getTime() !== icsEvent.startTime.getTime();
+    const endChanged          = currentEnd.getTime()   !== icsEvent.endTime.getTime();
+    const transparencyChanged = currentTransparency    !== newTransparency;
+
+    if (!startChanged && !endChanged && !transparencyChanged) return false;
+
     Calendar.Events.patch({
-      start: { dateTime: icsEvent.startTime.toISOString() },
-      end:   { dateTime: icsEvent.endTime.toISOString() }
+      start:        { dateTime: icsEvent.startTime.toISOString() },
+      end:          { dateTime: icsEvent.endTime.toISOString() },
+      transparency: newTransparency
     }, config.GOOGLE_CALENDAR_ID, googleEvent.id);
-    console.log('Updated event time:', config.EVENT_TITLE_PREFIX, 'to', icsEvent.startTime);
+    console.log('Updated event:', config.EVENT_TITLE_PREFIX, 'to', icsEvent.startTime);
     return true;
   } catch (error) {
     console.error('Error updating event:', error);
