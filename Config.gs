@@ -38,7 +38,14 @@ const CONFIG = [
     EVENT_TITLE_PREFIX: 'Work',
 
     // Minutes before the event to show a popup reminder (0 to disable)
-    NOTIFICATION_MINUTES: 5
+    NOTIFICATION_MINUTES: 5,
+
+    // When true, skip syncing Out of Office events for this calendar.
+    SKIP_OOF_EVENTS: true,
+
+    // Optional. Google Calendar emails an invite for every synced event to this address
+    // (e.g. your work email) so the slots are also blocked there. Omit to disable.
+    // INVITE_EMAIL: 'you@company.com'
   },
 
   // Add more entries here to sync additional calendars, for example:

@@ -61,6 +61,7 @@ Add more entries to the `CONFIG` array in `Config.gs` to sync additional Office 
 | `GOOGLE_CALENDAR_ID` | ID of the target Google Calendar |
 | `EVENT_TITLE_PREFIX` | Prefix used for all synced event titles (e.g. `Work`) |
 | `NOTIFICATION_MINUTES` | Minutes before event to show a popup reminder |
+| `SKIP_OOF_EVENTS` | When true, out-of-office events are ignored and not synced |
 
 ## Behavior
 

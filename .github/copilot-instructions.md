@@ -9,7 +9,7 @@ Office 365 ICS Feed → fetchICSData() → parseICSEvents() → diff with Google
 ```
 
 - **Entry point**: `syncCalendar()` in [Code.gs](../Code.gs) — iterates over `CONFIG` and calls `syncSingleCalendar()` per source
-- **Config**: [Config.gs](../Config.gs) — `CONFIG` array of `{ ICS_URL, GOOGLE_CALENDAR_ID, EVENT_TITLE_PREFIX, NOTIFICATION_MINUTES }` objects
+- **Config**: [Config.gs](../Config.gs) — `CONFIG` array of `{ ICS_URL, GOOGLE_CALENDAR_ID, EVENT_TITLE_PREFIX, NOTIFICATION_MINUTES, SKIP_OOF_EVENTS }` objects
 - **Timezone map**: [Timezones.gs](../Timezones.gs) — 100 Microsoft → IANA timezone name mappings
 
 ## Deployment

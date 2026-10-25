@@ -60,6 +60,21 @@ function syncSingleCalendar(config) {
   const allSeriesByTid = buildTrackingIdMap(allSeriesMasters);
   const allEventsByTid = buildTrackingIdMap(allSyncedEvents);
 
+  // Invites we send land in the Outlook calendar and come back through an ICS feed with the
+  // Google iCalUID. That feed usually belongs to a different config entry (and possibly a
+  // different Google calendar) than the one that sent the invite, so scan every configured calendar.
+  const invitedUids = new Set();
+  const addInvitedUids = events => events.forEach(e => {
+    if (e.iCalUID && e.attendees && e.attendees.length) invitedUids.add(e.iCalUID);
+  });
+  addInvitedUids(allSeriesMasters);
+  addInvitedUids(allSyncedEvents);
+  new Set(CONFIG.map(c => c.GOOGLE_CALENDAR_ID)).forEach(calendarId => {
+    if (calendarId === config.GOOGLE_CALENDAR_ID) return;
+    addInvitedUids(getExistingSeriesMasters(calendarId));
+    addInvitedUids(getExistingSyncedEvents(calendarId));
+  });
+
   const processedTrackingIds = new Set();
   let addedCount = 0;
   let updatedCount = 0;
@@ -71,6 +86,18 @@ function syncSingleCalendar(config) {
     // Skip all-day events entirely.
     if (icsEvent.isAllDay) {
       if (LOG_SKIPPED_EVENTS) console.log('SKIP all-day trackingId:', icsEvent.trackingId);
+      return;
+    }
+
+    if (invitedUids.has(icsEvent.uid)) {
+      if (LOG_SKIPPED_EVENTS) console.log('SKIP own invite trackingId:', icsEvent.trackingId);
+      return;
+    }
+
+    // Fully ended series are not synced; if all remaining occurrences are exceptions Google
+    // drops the series and every run would recreate it (and re-invite).
+    if (icsEvent.rrule && !icsEvent.recurrenceId && isPastEvent(icsEvent)) {
+      if (LOG_SKIPPED_EVENTS) console.log('SKIP ended series trackingId:', icsEvent.trackingId);
       return;
     }
 
@@ -88,6 +115,12 @@ function syncSingleCalendar(config) {
     // any previously synced standalone version is cleaned up in the deletion pass below.
     if (icsEvent.status === 'CANCELLED') {
       if (LOG_SKIPPED_EVENTS) console.log('SKIP cancelled trackingId:', icsEvent.trackingId);
+      return;
+    }
+
+    // Optionally ignore out-of-office events for this configured calendar.
+    if (config.SKIP_OOF_EVENTS && isOutOfOffice(icsEvent)) {
+      if (LOG_SKIPPED_EVENTS) console.log('SKIP out-of-office trackingId:', icsEvent.trackingId);
       return;
     }
 
@@ -137,7 +170,7 @@ function syncSingleCalendar(config) {
       const otherCreated = new Date(crossConfigVersion.created || 0).getTime();
       if (thisCreated > otherCreated) {
         try {
-          Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id);
+          Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id, SEND_UPDATES);
           deletedCount++;
           console.log('Removed duplicate series (older copy exists under another prefix):', series.summary);
         } catch (error) {
@@ -148,7 +181,7 @@ function syncSingleCalendar(config) {
     }
     if (!processedTrackingIds.has(trackingId)) {
       try {
-        Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id);
+        Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, series.id, SEND_UPDATES);
         deletedCount++;
         console.log('Deleted series:', series.summary);
       } catch (error) {
@@ -169,7 +202,7 @@ function syncSingleCalendar(config) {
       const otherCreated = new Date(crossConfigVersion.created || 0).getTime();
       if (thisCreated > otherCreated) {
         try {
-          Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, event.id);
+          Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, event.id, SEND_UPDATES);
           deletedCount++;
           console.log('Removed duplicate event (older copy exists under another prefix):', event.summary);
         } catch (error) {
@@ -180,7 +213,7 @@ function syncSingleCalendar(config) {
     }
     if (!processedTrackingIds.has(trackingId)) {
       try {
-        Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, event.id);
+        Calendar.Events.remove(config.GOOGLE_CALENDAR_ID, event.id, SEND_UPDATES);
         deletedCount++;
         console.log('Deleted event:', event.summary);
       } catch (error) {
@@ -330,7 +363,10 @@ function parseEventProperty(line, event) {
       event.uid = value;
       break;
     case 'X-MICROSOFT-CDO-BUSYSTATUS':
-      event.busyStatus = value; // BUSY, TENTATIVE, FREE
+      event.busyStatus = value; // BUSY, TENTATIVE, FREE, OOF
+      break;
+    case 'X-MICROSOFT-CDO-INTENDEDSTATUS':
+      event.intendedStatus = value; // OOF, FREE, etc.
       break;
     case 'STATUS':
       event.status = value; // CONFIRMED, TENTATIVE, CANCELLED
@@ -510,6 +546,60 @@ function extractUIDFromDescription(description) {
   return match ? match[1] : null;
 }
 
+// Makes Google email invites/updates/cancellations to attendees; a no-op for events without guests.
+const SEND_UPDATES = { sendUpdates: 'all' };
+
+/**
+ * Returns true if the event (or, for a series, its recurrence) has already finished.
+ * Series end is estimated from UNTIL or COUNT (upper bound for MONTHLY/YEARLY and multi-day BYDAY);
+ * unbounded series are never past.
+ */
+function isPastEvent(icsEvent) {
+  const now = new Date();
+  if (!(icsEvent.rrule && !icsEvent.recurrenceId)) return icsEvent.endTime < now;
+
+  const rule = icsEvent.rrule;
+  const until = rule.match(/UNTIL=(\d{4})(\d{2})(\d{2})/);
+  if (until) return new Date(Date.UTC(+until[1], +until[2] - 1, +until[3], 23, 59, 59)) < now;
+
+  const count = rule.match(/COUNT=(\d+)/);
+  if (!count) return false;
+  const freq = (rule.match(/FREQ=(\w+)/) || [])[1];
+  const stepDays = { DAILY: 1, WEEKLY: 7, MONTHLY: 31, YEARLY: 366 }[freq];
+  if (!stepDays) return false;
+  const interval = +((rule.match(/INTERVAL=(\d+)/) || [])[1] || 1);
+  const byday = rule.match(/BYDAY=([^;]+)/);
+  const perPeriod = freq === 'WEEKLY' && byday ? byday[1].split(',').length : 1;
+  const periods = Math.ceil(+count[1] / perPeriod);
+  const spanDays = (periods - 1) * interval * stepDays + (perPeriod > 1 ? 7 : 0);
+  return icsEvent.endTime.getTime() + spanDays * 86400000 < now.getTime();
+}
+
+/**
+ * Returns { attendees } adding config.INVITE_EMAIL to any existing guests,
+ * or {} when INVITE_EMAIL is not configured or the event is already in the past.
+ *
+ * @param {Object} config
+ * @param {Object} icsEvent
+ * @param {Object} [googleEvent] - Existing event whose attendees are preserved.
+ * @returns {Object}
+ */
+function inviteFields(config, icsEvent, googleEvent) {
+  if (!config.INVITE_EMAIL || isPastEvent(icsEvent)) return {};
+  const existing = (googleEvent && googleEvent.attendees) || [];
+  return { attendees: existing.concat([{ email: config.INVITE_EMAIL }]) };
+}
+
+/**
+ * Returns true if an invite is wanted (INVITE_EMAIL set, event not in the past)
+ * and INVITE_EMAIL is not yet an attendee of the event.
+ */
+function isInviteMissing(googleEvent, icsEvent, config) {
+  if (!config.INVITE_EMAIL || isPastEvent(icsEvent)) return false;
+  const email = config.INVITE_EMAIL.toLowerCase();
+  return !(googleEvent.attendees || []).some(a => (a.email || '').toLowerCase() === email);
+}
+
 /**
  * Returns true if the ICS event should be marked as free/transparent in Google Calendar.
  *
@@ -518,6 +608,18 @@ function extractUIDFromDescription(description) {
  */
 function isTentative(icsEvent) {
   return icsEvent.busyStatus === 'TENTATIVE' || icsEvent.status === 'TENTATIVE';
+}
+
+/**
+ * Returns true if the ICS event is an Out of Office slot.
+ * Out of office events are commonly expressed as either the busy status
+ * or the intended status being OOF in Office 365 / Outlook ICS feeds.
+ *
+ * @param {Object} icsEvent
+ * @returns {boolean}
+ */
+function isOutOfOffice(icsEvent) {
+  return icsEvent.busyStatus === 'OOF' || icsEvent.intendedStatus === 'OOF';
 }
 
 /**
@@ -653,8 +755,9 @@ function createRecurringGoogleEvent(calendarId, icsEvent, config) {
       reminders: {
         useDefault: false,
         overrides: [{ method: 'popup', minutes: config.NOTIFICATION_MINUTES }]
-      }
-    }, calendarId);
+      },
+      ...inviteFields(config, icsEvent)
+    }, calendarId, SEND_UPDATES);
     console.log('Created series:', config.EVENT_TITLE_PREFIX, 'starting', icsEvent.startTime, 'rrule:', icsEvent.rrule);
     return true;
   } catch (error) {
@@ -682,18 +785,22 @@ function updateRecurringSeriesIfChanged(seriesEvent, icsEvent, config) {
 
     const startChanged        = currentStart.getTime() !== icsEvent.startTime.getTime();
     const endChanged          = currentEnd.getTime()   !== icsEvent.endTime.getTime();
-    const rruleChanged        = currentRRule           !== icsEvent.rrule;
+    const rruleChanged        = currentRRule           !== sanitizeRrule(icsEvent.rrule);
     const transparencyChanged = currentTransparency    !== newTransparency;
+    const inviteMissing        = isInviteMissing(seriesEvent, icsEvent, config);
 
-    if (!startChanged && !endChanged && !rruleChanged && !transparencyChanged) return false;
+    if (!startChanged && !endChanged && !rruleChanged && !transparencyChanged && !inviteMissing) return false;
 
     Calendar.Events.patch({
       start:        googleDateTime(icsEvent.startTime, icsEvent.timezone),
       end:          googleDateTime(icsEvent.endTime,   icsEvent.timezone),
       recurrence:   buildRecurrence(icsEvent),
-      transparency: newTransparency
-    }, config.GOOGLE_CALENDAR_ID, seriesEvent.id);
-    console.log('Updated series:', config.EVENT_TITLE_PREFIX, 'starting', icsEvent.startTime);
+      transparency: newTransparency,
+      ...(inviteMissing ? inviteFields(config, icsEvent, seriesEvent) : {})
+    }, config.GOOGLE_CALENDAR_ID, seriesEvent.id, SEND_UPDATES);
+    console.log('Updated series:', config.EVENT_TITLE_PREFIX, 'starting', icsEvent.startTime,
+                'changed:', JSON.stringify({ startChanged, endChanged, rruleChanged, transparencyChanged, inviteMissing }),
+                'current rrule:', currentRRule, 'ics rrule:', icsEvent.rrule);
     return true;
   } catch (error) {
     console.error('Error updating recurring event:', error);
@@ -722,8 +829,9 @@ function createGoogleEvent(calendarId, icsEvent, config) {
       reminders: {
         useDefault: false,
         overrides: [{ method: 'popup', minutes: config.NOTIFICATION_MINUTES }]
-      }
-    }, calendarId);
+      },
+      ...inviteFields(config, icsEvent)
+    }, calendarId, SEND_UPDATES);
     console.log('Created event:', config.EVENT_TITLE_PREFIX, 'at', icsEvent.startTime);
     return true;
   } catch (error) {
@@ -766,7 +874,7 @@ function deleteCancelledOccurrence(calendarId, seriesId, exceptionIcsEvent) {
       return Math.abs(t - originalTime.getTime()) < 60000; // within 1 minute
     });
     if (instance) {
-      Calendar.Events.remove(calendarId, instance.id);
+      Calendar.Events.remove(calendarId, instance.id, SEND_UPDATES);
       console.log('Removed cancelled occurrence:', exceptionIcsEvent.recurrenceId);
     } else {
       if (LOG_SKIPPED_EVENTS) console.log('Cancelled occurrence not found in series (already removed?):', exceptionIcsEvent.recurrenceId);
@@ -797,15 +905,18 @@ function updateEventIfChanged(googleEvent, icsEvent, config) {
     const startChanged        = currentStart.getTime() !== icsEvent.startTime.getTime();
     const endChanged          = currentEnd.getTime()   !== icsEvent.endTime.getTime();
     const transparencyChanged = currentTransparency    !== newTransparency;
+    const inviteMissing        = isInviteMissing(googleEvent, icsEvent, config);
 
-    if (!startChanged && !endChanged && !transparencyChanged) return false;
+    if (!startChanged && !endChanged && !transparencyChanged && !inviteMissing) return false;
 
     Calendar.Events.patch({
       start:        { dateTime: icsEvent.startTime.toISOString() },
       end:          { dateTime: icsEvent.endTime.toISOString() },
-      transparency: newTransparency
-    }, config.GOOGLE_CALENDAR_ID, googleEvent.id);
-    console.log('Updated event:', config.EVENT_TITLE_PREFIX, 'to', icsEvent.startTime);
+      transparency: newTransparency,
+      ...(inviteMissing ? inviteFields(config, icsEvent, googleEvent) : {})
+    }, config.GOOGLE_CALENDAR_ID, googleEvent.id, SEND_UPDATES);
+    console.log('Updated event:', config.EVENT_TITLE_PREFIX, 'to', icsEvent.startTime,
+                'changed:', JSON.stringify({ startChanged, endChanged, transparencyChanged, inviteMissing }));
     return true;
   } catch (error) {
     console.error('Error updating event:', error);
